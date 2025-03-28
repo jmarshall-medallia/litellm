@@ -18,7 +18,6 @@ import redis  # type: ignore
 import redis.asyncio as async_redis  # type: ignore
 
 from litellm import get_secret, get_secret_str
-from litellm.constants import DEFAULT_REDIS_MAX_CONNECTIONS
 
 from ._logging import verbose_logger
 
@@ -313,8 +312,6 @@ def get_redis_async_client(
 def get_redis_connection_pool(**env_overrides):
     redis_kwargs = _get_redis_client_logic(**env_overrides)
     verbose_logger.debug("get_redis_connection_pool: redis_kwargs", redis_kwargs)
-    if "max_connections" not in redis_kwargs:
-        redis_kwargs["max_connections"] = DEFAULT_REDIS_MAX_CONNECTIONS
     if "url" in redis_kwargs and redis_kwargs["url"] is not None:
         return async_redis.BlockingConnectionPool.from_url(
             timeout=5, url=redis_kwargs["url"]
