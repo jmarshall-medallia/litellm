@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, TypedDict, Union, cast
 
 from litellm._logging import verbose_proxy_logger
 from litellm.caching import RedisCache
+from litellm.proxy._types import DailyUserSpendTransaction
 from litellm.secret_managers.main import str_to_bool
 
 if TYPE_CHECKING:
@@ -23,6 +24,7 @@ class DBSpendUpdateTransactions(TypedDict):
     team_list_transactions: Optional[Dict[str, float]]
     team_member_list_transactions: Optional[Dict[str, float]]
     org_list_transactions: Optional[Dict[str, float]]
+    daily_user_spend_transactions: Optional[Dict[str, DailyUserSpendTransaction]]
 
 
 class RedisUpdateBuffer:
@@ -84,6 +86,7 @@ class RedisUpdateBuffer:
                 team_list_transactions=prisma_client.team_list_transactions,
                 team_member_list_transactions=prisma_client.team_member_list_transactions,
                 org_list_transactions=prisma_client.org_list_transactions,
+                daily_user_spend_transactions=prisma_client.daily_user_spend_transactions,
             )
         )
         for key, _transactions in IN_MEMORY_UPDATE_TRANSACTIONS.items():
@@ -144,6 +147,9 @@ class RedisUpdateBuffer:
         org_transaction_keys = await self.redis_cache.async_scan_iter(
             "org_list_transactions:*"
         )
+        daily_user_spend_transaction_keys = await self.redis_cache.async_scan_iter(
+            "daily_user_spend_transactions:*"
+        )
 
         user_list_transactions = await self.redis_cache.async_batch_get_cache(
             user_transaction_keys
@@ -162,6 +168,9 @@ class RedisUpdateBuffer:
         )
         org_list_transactions = await self.redis_cache.async_batch_get_cache(
             org_transaction_keys
+        )
+        daily_user_spend_transactions = await self.redis_cache.async_batch_get_cache(
+            daily_user_spend_transaction_keys
         )
 
         # filter out the "prefix" from the keys using the helper method
@@ -183,6 +192,9 @@ class RedisUpdateBuffer:
         org_list_transactions = self._remove_prefix_from_keys(
             org_list_transactions, "org_list_transactions:"
         )
+        daily_user_spend_transactions = self._remove_prefix_from_keys(
+            daily_user_spend_transactions, "daily_user_spend_transactions:"
+        )
 
         return DBSpendUpdateTransactions(
             user_list_transactions=user_list_transactions,
@@ -191,4 +203,5 @@ class RedisUpdateBuffer:
             team_list_transactions=team_list_transactions,
             team_member_list_transactions=team_member_list_transactions,
             org_list_transactions=org_list_transactions,
+            daily_user_spend_transactions=daily_user_spend_transactions,
         )

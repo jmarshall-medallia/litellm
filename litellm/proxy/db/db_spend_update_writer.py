@@ -10,7 +10,7 @@ import os
 import time
 import traceback
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional, Union
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -18,6 +18,7 @@ from litellm.caching import DualCache, RedisCache
 from litellm.constants import DB_SPEND_UPDATE_JOB_NAME
 from litellm.proxy._types import (
     DB_CONNECTION_ERROR_TYPES,
+    DailyUserSpendTransaction,
     Litellm_EntityType,
     LiteLLM_UserTable,
     SpendLogsPayload,
@@ -431,6 +432,7 @@ class DBSpendUpdateWriter:
                 team_list_transactions=prisma_client.team_list_transactions,
                 team_member_list_transactions=prisma_client.team_member_list_transactions,
                 org_list_transactions=prisma_client.org_list_transactions,
+                daily_user_spend_transactions=prisma_client.daily_user_spend_transactions,
             )
             await DBSpendUpdateWriter._commit_spend_updates_to_db(
                 prisma_client=prisma_client,
@@ -690,3 +692,131 @@ class DBSpendUpdateWriter:
                     _raise_failed_update_spend_exception(
                         e=e, start_time=start_time, proxy_logging_obj=proxy_logging_obj
                     )
+        ### UPDATE DAILY USER SPEND ###
+        daily_user_spend_transactions = (
+            db_spend_update_transactions["daily_user_spend_transactions"] or {}
+        )
+        verbose_proxy_logger.debug(
+            "Daily User Spend transactions: {}".format(
+                len(daily_user_spend_transactions)
+            )
+        )
+
+        if len(daily_user_spend_transactions) > 0:
+            await DBSpendUpdateWriter.update_daily_user_spend(
+                n_retry_times=n_retry_times,
+                prisma_client=prisma_client,
+                proxy_logging_obj=proxy_logging_obj,
+                daily_user_spend_transactions=daily_user_spend_transactions,
+            )
+
+    @staticmethod
+    async def update_daily_user_spend(
+        n_retry_times: int,
+        prisma_client: PrismaClient,
+        proxy_logging_obj: ProxyLogging,
+        daily_user_spend_transactions: Dict[str, DailyUserSpendTransaction],
+    ):
+        """
+        Batch job to update LiteLLM_DailyUserSpend table using in-memory daily_spend_transactions
+        """
+        from litellm.proxy.utils import _raise_failed_update_spend_exception
+
+        BATCH_SIZE = (
+            100  # Number of aggregated records to update in each database operation
+        )
+        start_time = time.time()
+
+        try:
+            for i in range(n_retry_times + 1):
+                try:
+                    # Get transactions to process
+                    transactions_to_process = dict(
+                        list(daily_user_spend_transactions.items())[:BATCH_SIZE]
+                    )
+
+                    if len(transactions_to_process) == 0:
+                        verbose_proxy_logger.debug(
+                            "No new transactions to process for daily spend update"
+                        )
+                        break
+
+                    # Update DailyUserSpend table in batches
+                    async with prisma_client.db.batch_() as batcher:
+                        for _, transaction in transactions_to_process.items():
+                            user_id = transaction.get("user_id")
+                            if not user_id:  # Skip if no user_id
+                                continue
+
+                            batcher.litellm_dailyuserspend.upsert(
+                                where={
+                                    "user_id_date_api_key_model_custom_llm_provider": {
+                                        "user_id": user_id,
+                                        "date": transaction["date"],
+                                        "api_key": transaction["api_key"],
+                                        "model": transaction["model"],
+                                        "custom_llm_provider": transaction.get(
+                                            "custom_llm_provider"
+                                        ),
+                                    }
+                                },
+                                data={
+                                    "create": {
+                                        "user_id": user_id,
+                                        "date": transaction["date"],
+                                        "api_key": transaction["api_key"],
+                                        "model": transaction["model"],
+                                        "model_group": transaction.get("model_group"),
+                                        "custom_llm_provider": transaction.get(
+                                            "custom_llm_provider"
+                                        ),
+                                        "prompt_tokens": transaction["prompt_tokens"],
+                                        "completion_tokens": transaction[
+                                            "completion_tokens"
+                                        ],
+                                        "spend": transaction["spend"],
+                                    },
+                                    "update": {
+                                        "prompt_tokens": {
+                                            "increment": transaction["prompt_tokens"]
+                                        },
+                                        "completion_tokens": {
+                                            "increment": transaction[
+                                                "completion_tokens"
+                                            ]
+                                        },
+                                        "spend": {"increment": transaction["spend"]},
+                                    },
+                                },
+                            )
+
+                    verbose_proxy_logger.info(
+                        f"Processed {len(transactions_to_process)} daily spend transactions in {time.time() - start_time:.2f}s"
+                    )
+
+                    # Remove processed transactions
+                    for key in transactions_to_process.keys():
+                        daily_user_spend_transactions.pop(key, None)
+
+                    verbose_proxy_logger.debug(
+                        f"Processed {len(transactions_to_process)} daily spend transactions in {time.time() - start_time:.2f}s"
+                    )
+                    break
+
+                except DB_CONNECTION_ERROR_TYPES as e:
+                    if i >= n_retry_times:
+                        _raise_failed_update_spend_exception(
+                            e=e,
+                            start_time=start_time,
+                            proxy_logging_obj=proxy_logging_obj,
+                        )
+                    await asyncio.sleep(2**i)  # Exponential backoff
+
+        except Exception as e:
+            # Remove processed transactions even if there was an error
+            if "transactions_to_process" in locals():
+                for key in transactions_to_process.keys():  # type: ignore
+                    daily_user_spend_transactions.pop(key, None)
+            _raise_failed_update_spend_exception(
+                e=e, start_time=start_time, proxy_logging_obj=proxy_logging_obj
+            )
